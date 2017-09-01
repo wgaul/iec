@@ -5,6 +5,8 @@
 # current script is based on.  The purpose of this script is to calculate
 # Biotic Response (BR) functions for many species or other taxa using a
 # single function.
+# 
+# This script includes the function to add significance levels to BRCs.
 #
 # Original file (used for E. Giese's thesis): "IEC_Builder20120328.r"
 #   File "IEC_Builder20120328.r" was based on March Excel files but most
