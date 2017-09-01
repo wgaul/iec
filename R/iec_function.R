@@ -155,10 +155,12 @@ est_iec <- function(sp, brc, method = "pa", n_reps = 30, keep_zeros = TRUE,
   if (!all(as.character(brc[, 1]) %in% as.character(names(sp)))) {
     stop("Data frames 'sp' and 'brc' do not contain exactly the same taxa")
   }
-
   # Check that "method" has been set correctly.
   if (!method %in% c("q", "pa")) {
     stop("Method must be 'pa' (default) or 'q'.")
+  }
+  if(!parallel %in% c("none", "multicore", "snow")) {
+    stop("parallel method must be 'none', 'multicore', or 'snow'.  See documentation for 'boot' function.")
   }
 
 
@@ -284,7 +286,7 @@ est_iec <- function(sp, brc, method = "pa", n_reps = 30, keep_zeros = TRUE,
 
 
   boot_ci <- function(spRow, brc, possible_sp, n_boot, method, n_reps,
-                      keep_zeros){
+                      keep_zeros, parallel = "multicore"){
     # possible_sp is the object passed into boot
     # if the bootstrap fails to generate a confidence interval, the values for
     # the confidence interval will be set to NA
@@ -295,7 +297,7 @@ est_iec <- function(sp, brc, method = "pa", n_reps = 30, keep_zeros = TRUE,
                       spRow = spRow, brc = brc, 
                       method = method, n_reps = n_reps,
                       keep_zeros = keep_zeros, 
-                      parallel = "snow", ncpus = 3, cl = cl)
+                      parallel = parallel, ncpus = 3, cl = cl)
     }
     else bootObj <- NA
     
@@ -459,7 +461,7 @@ est_iec <- function(sp, brc, method = "pa", n_reps = 30, keep_zeros = TRUE,
       boot_result <- boot_ci(spRow = observed, brc = brc, 
                            possible_sp = possible_sp, n_boot = n_boot, 
                            method = method, n_reps = n_reps, 
-                           keep_zeros = keep_zeros)
+                           keep_zeros = keep_zeros, parallel = parallel)
       
       # add confidence intervals to iec_scores
       iec_scores[site, 4] <- boot_result[1]
