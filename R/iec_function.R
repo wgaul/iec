@@ -46,7 +46,7 @@
 # Authors: Nicholas G. Walton and Robert W. Howe
 #
 # Created: Mar 2013(?)
-# Last modified: 25 Sept 2015
+# Last modified: 25 Nov 2016 by Willson Gaul
 
 #' Estimate IEC site scores.
 #'
@@ -89,6 +89,16 @@
 #' @param method one of \code{"pa"} (default; CalcPA) or \code{"q"} (CalcQ).
 #' @param n_reps scalar integer setting the number of random starts for
 #'   optimization (default is 30).
+#' @param possible_sp character vector of all taxa possible at site.
+#' @param conf_int logical indicating if confidence intervals should be 
+#'   calculated.
+#' @param n_boot integer setting the number of bootstrap samples to use for 
+#'  calculating confidence intervals.
+#' @param parallel character string indicating a method to use for parallel
+#'  computation of confidence intervals.  If set to "multicore" (not available
+#'  on Windows), no additional setup is needed.  If set to "snow", user must 
+#'  set up a cluster and prepare the cluster environment before calling est_iec.
+#'  See examples.
 #' @param keep_zeros logical indicating if all taxa are used in scoring
 #'   (\code{TRUE}; default) or only detected taxa.
 #' @inheritParams est_brc
@@ -108,7 +118,9 @@
 #'   probability-based indicator of ecological condition. Ecological Indicators
 #'   7:793-806.
 #' @seealso \code{\link{est_brc}} to generate biotic response curves.
-est_iec <- function(sp, brc, method = "pa", n_reps = 30, keep_zeros = TRUE) {
+est_iec <- function(sp, brc, method = "pa", n_reps = 30, keep_zeros = TRUE, 
+                    possible_sp, conf_int = F, n_boot = 100, 
+                    parallel = "none") {
 
   # The input "sp" is a data frame containing the observations for each
   # species or other taxa (abundance or presence/absence) at each site.
@@ -132,14 +144,16 @@ est_iec <- function(sp, brc, method = "pa", n_reps = 30, keep_zeros = TRUE) {
   }
 
   # Check that "sp" and "brc" contain the same number of taxa.
-  if (ncol(sp) != nrow(brc)) {
-    stop("Species observation and BRC data frames differ in number of taxa.")
-  }
+  # Remove this so that all possible species can be passed to est_iec?
+  # This would allow the colnames of sp to be the list from which species
+  # are resampled for CIs.  
+  # if (length(unique(names(sp))) != length(unique(brc[, 1]))) {
+  #   stop("Species observation and BRC data frames differ in number of taxa.")
+  # }
 
-  # Check that "sp" and "brc" contain the same taxa.
-  if (!identical(as.character(names(sp)), as.character(brc[, 1]))) {
-    stop(paste("Data frames 'sp' and 'brc' do not contain the same taxa \n",
-               "or are not ordered the same."))
+  # Check that "brc" only contains taxa which were sampled in "sp".
+  if (!all(as.character(brc[, 1]) %in% as.character(names(sp)))) {
+    stop("Data frames 'sp' and 'brc' do not contain exactly the same taxa")
   }
 
   # Check that "method" has been set correctly.
@@ -152,12 +166,29 @@ est_iec <- function(sp, brc, method = "pa", n_reps = 30, keep_zeros = TRUE) {
 
   # Generate a data frame to hold the output IEC site score data;
   # an empty data frame with 3 columns - data type defined.
-  iec_scores <- data.frame(character(0), rep(list(numeric(0)), 2),
+  iec_scores <- data.frame(character(0), rep(list(numeric(0)), 4),
                               stringsAsFactors = FALSE)
-  names(iec_scores) <- c("Site", "IEC", "LogLik")
+  names(iec_scores) <- c("Site", "IEC", "LogLik", "CIlower", "CIupper")
 
   # Make an original copy of "brc" if zeros are to be dropped from each site
   if (!keep_zeros) brc_raw <- brc
+  
+  # Function to manipulate brc and sp so that they have the same taxa
+  # in the same order as required by est_iec().  
+  # This will create duplicate columns of "observations" for those species 
+  # for which multiple BRCs are being used.
+  format_sp <- function(sp, brc){
+    # make sure that the rows of brc have all BRCs for each species grouped
+    brc <- brc[order(as.character(brc[, 1])), ]
+    new_sp <- data.frame(matrix(nrow = nrow(sp), ncol = nrow(brc)))
+    names(new_sp) <- as.character(brc[, 1])
+    row.names(new_sp) <- row.names(sp)
+    for(i in 1:ncol(new_sp)){
+      new_sp[, i] <- sp[, which(as.character(names(sp)) == 
+                                  as.character(names(new_sp)[i]))]
+    }
+    new_sp
+  }
 
   # Function to generate stratified random selection of starting IEC values.
   get_strat <- function(n) {
@@ -193,6 +224,108 @@ est_iec <- function(sp, brc, method = "pa", n_reps = 30, keep_zeros = TRUE) {
     strat   # Return the vector of starting values for "nlminb".
   }
 
+  ## define functions to generate bootstrap confidence intervals
+  # `est_iec` contains a function 'boot_ci' which calls
+  # `boot()` using the statistic defined by the function 'do_iec'.  
+  # `do_iec` simply calls est_iec on the resampled data, 
+  # but with the inputs and outputs format required
+  # of a statistic used in `boot`.
+  # This function returns the bias-corrected, accelerated bootstrap confidence
+  # interval (Efron & Tibshirani.  See documentation for function `boot.ci` 
+  # in package `boot`)
+  #
+  # est_iec
+  #   boot_ci
+  #     do_iec
+  #       est_iec
+  #
+  # inputs: spRow - a 1-row dataframe containing species observations
+  #         brc - a data frame containing BRC parameters for each species 
+  #         possible_sp - a character vector of all species possible at the 
+  #                       site (this will be the object resampled by `boot`) 
+  #         n_boot - number of bootstrap resamples to do 
+  #         method - method to be passed to `est_iec`, either "pa" or "q"  
+  #         n_reps - to be passed to `est_iec` 
+  #         keep_zeros - to be passed to `est_iec`
+  # output: 'bootObj', a boot object containing the empirical bootstrap 
+  # distribution of IEC scores for a site.
+
+  # define function to use as the statistic in `boot`
+  do_iec <- function(possible_sp, index, spRow, brc, method, n_reps, 
+                     keep_zeros){
+    # `do_iec` calls est_iec on the resampled data using the inputs and outputs 
+    # format required of a statistic used in `boot`.
+    # index is passed by `boot` (not set by user)
+    
+    # use index from `boot` to select the resampled species
+    taxa <- as.character(possible_sp[index]) 
+    taxa <- taxa[order(taxa)]
+
+    # deal with the fact that spRow loses its dataframe class when passed
+    # re-define it as a df here. 
+    sp_resamp <- as.data.frame(matrix(data = as.numeric(as.character(spRow)),
+                                      nrow = 1, ncol = length(spRow)))
+    names(sp_resamp) <- as.character(names(spRow))
+    
+    # only calculate resample IEC if at least 1 significant species resampled
+    if(length(which(unique(as.character(brc$Taxon)) %in% 
+                    as.character(taxa))) > 0){
+      # subset brc to only resampled taxa
+      brc_resamp <- brc[as.character(brc$Taxon) %in% as.character(taxa), ]
+      # calc iec for the resample
+      result <- est_iec(sp = sp_resamp, brc = brc_resamp, 
+                        keep_zeros = keep_zeros,
+                        method = method, n_reps = n_reps, conf_int = F)
+      result <- result$IEC
+    }
+    else result <- NA 
+    result
+  }
+
+
+  boot_ci <- function(spRow, brc, possible_sp, n_boot, method, n_reps,
+                      keep_zeros){
+    # possible_sp is the object passed into boot
+    # if the bootstrap fails to generate a confidence interval, the values for
+    # the confidence interval will be set to NA
+    
+    # only attempt bootstrap if more than 1 significant species observed
+    if(length(unique(as.character(brc$Taxon))) > 1) {
+      bootObj <- boot(possible_sp, statistic = do_iec, R = n_boot, stype = "i",
+                      spRow = spRow, brc = brc, 
+                      method = method, n_reps = n_reps,
+                      keep_zeros = keep_zeros, 
+                      parallel = "snow", ncpus = 3, cl = cl)
+    }
+    else bootObj <- NA
+    
+    bounds <- data.frame(matrix(nrow = 1, ncol = 2)) # define df to hold results
+    names(bounds) <- c("CIlower", "CIupper")
+    
+    if(!is.na(bootObj[1])){ # if bootstrap suceeded
+      # use tryCatch in case there are other problems with the bootstrap that
+      # prevent calculation of a confidence interval.  In all those cases,
+      # return NA since no CI can be calculated.
+      
+      ci_results <- tryCatch(boot.ci(bootObj, type = "bca"), 
+                             error = function(c) c(NA_real_, NA_real_)
+      )
+      
+      if(exists("ci_results") && class(ci_results) == "bootci"){ 
+        bounds$CIlower <- ci_results$bca[4]
+        bounds$CIupper <- ci_results$bca[5]
+      }
+      else {
+        bounds[1, ] <- c(NA_real_, NA_real_)
+      }
+    }
+    else { # if there wasn't enough data to calculate bootstrap CI
+      bounds$CIlower <- NA_real_
+      bounds$CIupper <- NA_real_
+    }
+    bounds
+  }
+  
   # Set method/criteria for estimating IEC
   # Return function for "q" or "pa" based on "method"
   # Method must be set to "q" or "pa"
@@ -250,6 +383,11 @@ est_iec <- function(sp, brc, method = "pa", n_reps = 30, keep_zeros = TRUE) {
     criteria(pc, observed)
   }
 
+  
+  ## format sp dataframe to match brc
+  # This makes multiple columns in sp if a species has multiple BRCs
+  # This also removes species from sp if they do not have BRCs
+  sp <- format_sp(sp, brc)
 
   ## for loop over each site ----
   # This for loop iteratively processes each site in the data frame "sp".
@@ -270,7 +408,8 @@ est_iec <- function(sp, brc, method = "pa", n_reps = 30, keep_zeros = TRUE) {
       # If there are no species detected, set iec attributes to NA and
       # go to the next site
       if (length(keep) == 0) {
-        iec_scores[site, ] <- list(row.names(sp)[site], NA_real_, NA_real_)
+        iec_scores[site, ] <- list(row.names(sp)[site], NA_real_, NA_real_, 
+                                   NA_real_, NA_real_)
         next
       }
 
@@ -312,8 +451,27 @@ est_iec <- function(sp, brc, method = "pa", n_reps = 30, keep_zeros = TRUE) {
     # data frame "iec_scores".
     # best$objective is multiplied by -1 to put it on the same scale as
     # the original Excel based versions.
-    iec_scores[site, ] <- list(row.names(sp)[site], best$par, -best$objective)
+    iec_scores[site, ] <- list(row.names(sp)[site], best$par, -best$objective, 
+                               NA, NA)
+    
+    # generate bootstrap distribution of IEC scores
+    if(conf_int == T){
+      boot_result <- boot_ci(spRow = observed, brc = brc, 
+                           possible_sp = possible_sp, n_boot = n_boot, 
+                           method = method, n_reps = n_reps, 
+                           keep_zeros = keep_zeros)
+      
+      # add confidence intervals to iec_scores
+      iec_scores[site, 4] <- boot_result[1]
+      iec_scores[site, 5] <- boot_result[2]
+      
+    }
+    
   }
+  
+
+
+  
 
   # Return "iec_scores"
   iec_scores
