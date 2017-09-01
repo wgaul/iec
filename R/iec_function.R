@@ -286,7 +286,7 @@ est_iec <- function(sp, brc, method = "pa", n_reps = 30, keep_zeros = TRUE,
 
 
   boot_ci <- function(spRow, brc, possible_sp, n_boot, method, n_reps,
-                      keep_zeros, parallel = "multicore"){
+                      keep_zeros, parallel = parallel){
     # possible_sp is the object passed into boot
     # if the bootstrap fails to generate a confidence interval, the values for
     # the confidence interval will be set to NA
